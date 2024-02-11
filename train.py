@@ -7,7 +7,7 @@ from utils import *
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 train_loader = DataLoader(AlpacaDataset(),
-                          batch_size=24,
+                          batch_size=100,
                           shuffle=True,
                           pin_memory=True)
 
@@ -66,9 +66,9 @@ def train(train_loader, model, criterion, epochs):
             count += samples
 
             if i % 100 == 0:
-                print("Epoch [{}][{}/{}]\tLoss: {:.3f}".format(epoch, i, len(train_loader), sum_loss/count))
+                print("Epoch [{}][{}/{}]\tLoss: {:.3f}%".format(epoch, i, len(train_loader), sum_loss/count))
 
         state = {'epoch': epoch, 'transformer': model, 'transformer_optimizer': model_optimizer}
         torch.save(state, 'checkpoints/checkpoint_' + str(epoch) + '.pth.tar')
 
-train(train_loader, model, loss_criterion, 10)
+train(train_loader, model, loss_criterion, 2)

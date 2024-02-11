@@ -11,6 +11,18 @@ from typing import Optional
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class RotaryPositionalEmbedding(nn.Module):
+    '''
+    Initializes rotary positional embeddings class.
+
+    Parameters
+    ----------
+    embed_dim:      int
+            the embedding dimension of transformers model.
+
+    Returns
+    -------
+    tensor
+    '''
     def __init__(self, embed_dim) -> None:
         super(RotaryPositionalEmbedding, self).__init__()
         inv_freq = 1. / (10_000 ** (torch.arange(0, embed_dim, 2).float() / embed_dim))
@@ -77,20 +89,56 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor):
         x, gate = x.chunk(2, dim=-1)
         return F.silu(gate) * x
-        
 
-class Normalizer(nn.Module):
-    def __init__(self, embed_dim, eps=1e-6) -> None:
-        super().__init__()
+
+class RMSNorm(nn.Module):
+    def __init__(
+        self, 
+        embed_dim: int,
+        p:Optional[float] = -1,
+        eps:float = 1e-6, 
+        bias:Optional[bool] = False
+    ) -> None:
+        '''
+        Root Mean Square Layer Normalization
+        :param d: model size
+        :param p: partial RMSNorm, valid value [0, 1], default -1.0 (disabled)
+        :param eps:  epsilon value, default 1e-8
+        :param bias: whether use bias term for RMSNorm, disabled by
+            default because RMSNorm doesn't enforce re-centering invariance.
+
+        Reference: https://github.com/bzhangGo/rmsnorm/blob/master/rmsnorm_torch.py
+        '''
+        super(RMSNorm, self).__init__()
         self.embed_dim = embed_dim
-        self.alpha = nn.Parameter(torch.ones(self.embed_dim))
-        self.bias = nn.Parameter(torch.zeros(self.embed_dim))
+        self.p = p
+        self.alpha = nn.Parameter(torch.ones(embed_dim))
+        self.register_parameter('alpha', self.alpha)
+        self.bias = bias
         self.eps = eps
-    
+
+        if self.bias:
+            self.offset = nn.Parameter(torch.zeros(embed_dim))
+            self.register_parameter('offset', self.offset)
+
     def forward(self, x: torch.Tensor):
-        norm = (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + self.eps)
-        norm = self.alpha * norm + self.bias 
-        return norm
+        if self.p < 0 or self.p > 1:
+            norm_x = x.norm(2, dim=-1, keepdim=True)
+            d_x = self.embed_dim
+        else:
+            partial_size = int(self.embed_dim * self.p)
+            partial_x, _ = torch.split(x, [partial_size, self.embed_dim - partial_size], dim=-1)
+
+            norm_x = partial_x.norm(2, dim=-1, keepdim=True)
+            d_x = partial_size
+        
+        rms_x = norm_x * d_x ** (-0.5)
+        x_normalized = x / (rms_x + self.eps)
+
+        if self.bias:
+            return self.alpha * x_normalized + self.offset
+
+        return self.alpha * x_normalized
 
 
 class MultiheadAttention(nn.Module):
@@ -161,7 +209,6 @@ class FeedForward(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(embed_dim, ff_dim),
             SwiGLU(),
-            # nn.SiLU(),
             nn.Dropout(p=dropout),
             nn.Linear(ff_dim // 2, embed_dim)
         )
@@ -173,7 +220,7 @@ class FeedForward(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, embed_dim, n_heads, dropout=0.1) -> None:
         super(EncoderLayer, self).__init__()
-        self.layernorm = nn.LayerNorm(embed_dim)
+        self.layernorm = RMSNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
 
         self.multihead = MultiheadAttention(d_model=embed_dim, n_heads=n_heads, dropout=dropout)
@@ -203,7 +250,7 @@ class EncoderLayer(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, embed_dim, n_heads, dropout: Optional[float] = 0.1) -> None:
         super(DecoderLayer, self).__init__()
-        self.layernorm = nn.LayerNorm(embed_dim)
+        self.layernorm = RMSNorm(embed_dim)
         self.mha1 = MultiheadAttention(d_model=embed_dim, n_heads=n_heads)
         self.mha2 = MultiheadAttention(d_model=embed_dim, n_heads=n_heads)
         self.ffwd = FeedForward(embed_dim)
