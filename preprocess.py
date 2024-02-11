@@ -146,12 +146,12 @@ def indexes_from_sentence(voc, words):
 max_len = 50
 
 def encode_question(voc, sentence):
-    words = sentence.split(' ')
+    words = sentence.split(' ')[:max_len]
     enc_c = indexes_from_sentence(voc, words) + [PAD_token] * (max_len - len(words))
     return enc_c
 
 def encode_answer(voc, sentence):
-    words = sentence.split(' ')
+    words = sentence.split(' ')[:max_len]
     enc_c = [SOS_token] + indexes_from_sentence(voc, words) + [EOS_token] + [PAD_token] * (max_len - len(words))
     return enc_c
 

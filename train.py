@@ -13,8 +13,8 @@ train_loader = DataLoader(AlpacaDataset(),
 
 d_model = 512
 n_heads = 8
-n_layers = 6
-epochs = 10
+n_layers = 10
+epochs = 20
 
 with open('word_map.json', 'r') as j:
     word_map = json.load(j)
@@ -52,7 +52,10 @@ def train(train_loader, model, criterion, epochs):
             # get transformer outputs
             out = model(question, question_mask, answer_input, answer_input_mask)
 
+            # ys = answer_target.contiguous().view(-1)
+
             loss = criterion(out, answer_target, answer_target_mask)
+            # loss = F.cross_entropy(out.view(-1, out.size(-1)), ys, ignore_index=1)
 
             # backpropagation
             model_optimizer.optimizer.zero_grad()
@@ -66,6 +69,6 @@ def train(train_loader, model, criterion, epochs):
                 print("Epoch [{}][{}/{}]\tLoss: {:.3f}".format(epoch, i, len(train_loader), sum_loss/count))
 
         state = {'epoch': epoch, 'transformer': model, 'transformer_optimizer': model_optimizer}
-        torch.save(state, 'checkpoint_' + str(epoch) + '.pth.tar')
+        torch.save(state, 'checkpoints/checkpoint_' + str(epoch) + '.pth.tar')
 
 train(train_loader, model, loss_criterion, 10)

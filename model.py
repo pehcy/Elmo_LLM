@@ -10,6 +10,24 @@ from typing import Optional
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(self, embed_dim) -> None:
+        super(RotaryPositionalEmbedding, self).__init__()
+        inv_freq = 1. / (10_000 ** (torch.arange(0, embed_dim, 2).float() / embed_dim))
+        self.register_buffer("inv_freq", inv_freq)
+    
+    def _rotate_half(self, x: torch.Tensor):
+        x = rearrange(x, '... (j d) -> ... j d', j=2)
+        x1, x2 = x.unbind(dim=-2)
+        return torch.cat((-x2, x1), dim=-1)
+
+    def forward(self, x, max_seq_len):
+        seq = torch.arange(max_seq_len, dtype=self.inv_freq.dtype, device=DEVICE)
+        freqs = torch.einsum("i,j->ij", seq, self.inv_freq)
+        positions = torch.cat((freqs, freqs), dim=-1)
+        return (x * positions.cos()) + (self._rotate_half(x) * positions.sin())
+
+
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, embed_dim: int, max_seq_len: int, dropout: Optional[float] = 0.1) -> None:
         '''
@@ -55,6 +73,12 @@ class SinusoidalPositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class SwiGLU(nn.Module):
+    def forward(self, x: torch.Tensor):
+        x, gate = x.chunk(2, dim=-1)
+        return F.silu(gate) * x
+        
+
 class Normalizer(nn.Module):
     def __init__(self, embed_dim, eps=1e-6) -> None:
         super().__init__()
@@ -94,14 +118,21 @@ class MultiheadAttention(nn.Module):
         self.to_k = nn.Linear(d_model, self.d_k * n_heads)
         self.to_v = nn.Linear(d_model, self.d_k * n_heads)
 
+        self.q_rope = RotaryPositionalEmbedding(d_model)
+        self.k_rope = RotaryPositionalEmbedding(d_model)
+
         self.dropout = nn.Dropout(dropout)
         self.out = nn.Linear(self.d_k * n_heads, d_model)
 
     def forward(self, q, k, v, mask=None):
         # (batch size, max seq len, 512)
+        max_seq_len = q.shape[1]
         q = self.to_q(q)
         k = self.to_k(k)
         v = self.to_v(v)
+
+        q = self.q_rope(q, max_seq_len)
+        k = self.k_rope(k, max_seq_len)
 
         # k = k.view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
         # q = q.view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
@@ -129,9 +160,10 @@ class FeedForward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(embed_dim, ff_dim),
-            nn.SiLU(),
+            SwiGLU(),
+            # nn.SiLU(),
             nn.Dropout(p=dropout),
-            nn.Linear(ff_dim, embed_dim)
+            nn.Linear(ff_dim // 2, embed_dim)
         )
     
     def forward(self, x):
@@ -195,6 +227,8 @@ class Transformer(nn.Module):
         self.vocab_size = len(word_map)
         self.pe = SinusoidalPositionalEncoding(embed_dim=d_model, max_seq_len=self.vocab_size)
 
+        self.embeddings = nn.Embedding(self.vocab_size, d_model)
+
         self.encoders = nn.ModuleList([
             EncoderLayer(embed_dim=d_model, n_heads=n_heads) for _ in range(n_layers)])
         
@@ -204,7 +238,8 @@ class Transformer(nn.Module):
         self.proj = nn.Linear(d_model, self.vocab_size)
     
     def encode_stack(self, src_words, src_mask):
-        src_embeddings = self.pe(src_words)
+        # src_embeddings = self.pe(src_words)
+        src_embeddings = self.embeddings(src_words)
 
         # fold left for each encoder layer
         # [acc := layer(acc) for layer in self.encoder]
@@ -214,7 +249,8 @@ class Transformer(nn.Module):
         return src_embeddings
     
     def decode_stack(self, target_words, target_mask, src_embeddings, src_mask):
-        target_embeddings = self.pe(target_words)
+        # target_embeddings = self.pe(target_words)
+        target_embeddings = self.embeddings(target_words)
 
         # fold left for each encoder layer
         # [acc := layer(acc) for layer in self.encoder]
