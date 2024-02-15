@@ -3,11 +3,13 @@ import torch
 from torch.utils.data import DataLoader
 from model import *
 from utils import *
+from typing import Optional
+from autoregressive import AutoregressiveWrapper
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 train_loader = DataLoader(AlpacaDataset(),
-                          batch_size=100,
+                          batch_size=64,
                           shuffle=True,
                           pin_memory=True)
 
@@ -19,12 +21,12 @@ epochs = 20
 with open('word_map.json', 'r') as j:
     word_map = json.load(j)
 
-model = Transformer(
+model = AutoregressiveWrapper(gpt_model=Transformer(
             d_model=d_model, 
             n_heads=n_heads, 
             n_layers=n_layers, 
             word_map=word_map
-        ).to(DEVICE)
+        ), max_seq_len=200, device=DEVICE)
 
 adam_optimizer = torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
 model_optimizer = AdamWarmup(model_size=d_model, warmup_steps=4000, optimizer=adam_optimizer)
@@ -38,23 +40,22 @@ def train(train_loader, model, criterion, epochs):
     for epoch in range(epochs):
         for i, (question, answer) in enumerate(train_loader):
             samples = question.shape[0]
-
             # Use GPU if available
             question = question.to(DEVICE)
             answer = answer.to(DEVICE)
 
-            answer_input = answer[:, :-1]
-            answer_target = answer[:, 1:]
+            # answer_input = answer[:, :-1]
+            # answer_target = answer[:, 1:]
 
             # create masks and add dimensions
-            question_mask, answer_input_mask, answer_target_mask = create_masks(question, answer_input, answer_target)
+            # question_mask, answer_input_mask, answer_target_mask = create_masks(question, answer_input, answer_target)
             
             # get transformer outputs
-            out = model(question, question_mask, answer_input, answer_input_mask)
+            output, loss = model(question, answer, criterion=criterion)
 
             # ys = answer_target.contiguous().view(-1)
 
-            loss = criterion(out, answer_target, answer_target_mask)
+            # loss = criterion(out, answer_target, answer_target_mask)
             # loss = F.cross_entropy(out.view(-1, out.size(-1)), ys, ignore_index=1)
 
             # backpropagation
@@ -71,4 +72,4 @@ def train(train_loader, model, criterion, epochs):
         state = {'epoch': epoch, 'transformer': model, 'transformer_optimizer': model_optimizer}
         torch.save(state, 'checkpoints/checkpoint_' + str(epoch) + '.pth.tar')
 
-train(train_loader, model, loss_criterion, 2)
+train(train_loader, model, loss_criterion, 10)

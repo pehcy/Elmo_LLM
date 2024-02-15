@@ -23,20 +23,23 @@ class RotaryPositionalEmbedding(nn.Module):
     -------
     tensor
     '''
-    def __init__(self, embed_dim) -> None:
+    def __init__(self, embed_dim, base=10_000) -> None:
         super(RotaryPositionalEmbedding, self).__init__()
-        inv_freq = 1. / (10_000 ** (torch.arange(0, embed_dim, 2).float() / embed_dim))
-        self.register_buffer("inv_freq", inv_freq)
-    
-    def _rotate_half(self, x: torch.Tensor):
+        self.embed_dim = embed_dim
+        self.base = base
+
+    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
         x = rearrange(x, '... (j d) -> ... j d', j=2)
         x1, x2 = x.unbind(dim=-2)
         return torch.cat((-x2, x1), dim=-1)
-
-    def forward(self, x, max_seq_len):
-        seq = torch.arange(max_seq_len, dtype=self.inv_freq.dtype, device=DEVICE)
-        freqs = torch.einsum("i,j->ij", seq, self.inv_freq)
-        positions = torch.cat((freqs, freqs), dim=-1)
+    
+    def forward(self, x):
+        seq_len, device = x.shape[1], x.device
+        theta = 1. / (self.base ** (torch.arange(0, self.embed_dim, 2).float() / self.embed_dim)).to(device)
+        seq_idx = torch.arange(seq_len, device=x.device).float()
+        freqs = torch.einsum("i,j->ij", seq_idx, theta)
+        
+        positions = torch.cat([freqs, freqs], dim=-1)
         return (x * positions.cos()) + (self._rotate_half(x) * positions.sin())
 
 
@@ -179,12 +182,12 @@ class MultiheadAttention(nn.Module):
         k = self.to_k(k)
         v = self.to_v(v)
 
-        q = self.q_rope(q, max_seq_len)
-        k = self.k_rope(k, max_seq_len)
+        q = self.q_rope(q)
+        k = self.k_rope(k)
 
-        # k = k.view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
-        # q = q.view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
-        # v = v.view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
+        # q = self.q_rope(q, max_seq_len)
+        # k = self.k_rope(k, max_seq_len)
+
         q, k, v = rearrange_many((q, k, v), 'b c (h w) -> b w c h', h=self.d_k)
 
         scores = torch.matmul(q, k.permute(0,1,3,2)) / math.sqrt(self.d_k)
@@ -196,7 +199,6 @@ class MultiheadAttention(nn.Module):
 
         context = torch.matmul(weights, v)
 
-        # concat = attn.transpose(1,2).contiguous().view(batch_size, -1, self.d_k * self.n_heads)
         output = rearrange(context, "b c h w -> b h (c w)")
         output = self.out(output)
 
@@ -258,9 +260,9 @@ class DecoderLayer(nn.Module):
     
     def forward(self, embeddings, encoded, src_mask, target_mask):
         query = self.mha1(embeddings, embeddings, embeddings, target_mask)
-        query = self.dropout(query)
-
-        interacted = self.dropout(self.mha1(query, encoded, encoded, src_mask))
+        # query = self.dropout(query)
+        query = self.layernorm(query + embeddings)
+        interacted = self.dropout(self.mha2(query, encoded, encoded, src_mask))
         interacted = self.layernorm(interacted + query)
         ffwd_out = self.dropout(self.ffwd(interacted))
         decoded = self.layernorm(ffwd_out + interacted)
@@ -282,7 +284,7 @@ class Transformer(nn.Module):
         self.decoders = nn.ModuleList([
                 DecoderLayer(d_model, n_heads) for _ in range(n_layers)])
         
-        self.proj = nn.Linear(d_model, self.vocab_size)
+        self.logits = nn.Linear(d_model, self.vocab_size)
     
     def encode_stack(self, src_words, src_mask):
         # src_embeddings = self.pe(src_words)
@@ -314,5 +316,5 @@ class Transformer(nn.Module):
     def forward(self, src_words, src_mask, target_words, target_mask):
         encoded = self.encode_stack(src_words, src_mask)
         decoded = self.decode_stack(target_words, target_mask, encoded, src_mask)
-        out = F.log_softmax(self.proj(decoded), dim=2)
+        out = F.log_softmax(self.logits(decoded), dim=2)
         return out
